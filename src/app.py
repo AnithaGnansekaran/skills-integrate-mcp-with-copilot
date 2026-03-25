@@ -5,11 +5,79 @@ A super simple FastAPI application that allows students to view and sign up
 for extracurricular activities at Mergington High School.
 """
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Depends, status
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import RedirectResponse
 import os
+import json
 from pathlib import Path
+from typing import Optional
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
+import secrets
+import logging
+security = HTTPBasic()
+
+# Load teacher credentials from JSON file
+def load_teachers():
+    with open(os.path.join(Path(__file__).parent, "teachers.json")) as f:
+        data = json.load(f)
+    return {t["username"]: t["password"] for t in data["teachers"]}
+
+TEACHERS = load_teachers()
+
+# Set up logging for certificate access
+logging.basicConfig(filename=os.path.join(Path(__file__).parent, "certificate_access.log"),
+                    level=logging.INFO,
+                    format='%(asctime)s %(levelname)s %(message)s')
+
+# Directory to store uploaded certificates
+CERT_DIR = os.path.join(Path(__file__).parent, "certificates")
+os.makedirs(CERT_DIR, exist_ok=True)
+
+# Auth dependency
+def teacher_auth(credentials: HTTPBasicCredentials = Depends(security)):
+    correct_password = TEACHERS.get(credentials.username)
+    if not correct_password or not secrets.compare_digest(credentials.password, correct_password):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid authentication credentials",
+            headers={"WWW-Authenticate": "Basic"},
+        )
+    return credentials.username
+
+# Endpoint: Upload certificate (teachers only)
+@app.post("/certificates/upload")
+def upload_certificate(
+    activity_name: str = Form(...),
+    participant_email: str = Form(...),
+    file: UploadFile = File(...),
+    username: str = Depends(teacher_auth)
+):
+    # Save file as <activity>_<email>_<filename>
+    safe_email = participant_email.replace("@", "_at_").replace(".", "_")
+    cert_filename = f"{activity_name}_{safe_email}_{file.filename}"
+    cert_path = os.path.join(CERT_DIR, cert_filename)
+    with open(cert_path, "wb") as f_out:
+        f_out.write(file.file.read())
+    logging.info(f"Certificate uploaded: {cert_filename} by {username}")
+    return {"message": "Certificate uploaded successfully."}
+
+# Endpoint: Download certificate (teachers only)
+@app.get("/certificates/download")
+def download_certificate(
+    activity_name: str,
+    participant_email: str,
+    filename: str,
+    username: str = Depends(teacher_auth)
+):
+    safe_email = participant_email.replace("@", "_at_").replace(".", "_")
+    cert_filename = f"{activity_name}_{safe_email}_{filename}"
+    cert_path = os.path.join(CERT_DIR, cert_filename)
+    if not os.path.exists(cert_path):
+        raise HTTPException(status_code=404, detail="Certificate not found")
+    logging.info(f"Certificate accessed: {cert_filename} by {username}")
+    from fastapi.responses import FileResponse
+    return FileResponse(cert_path, filename=filename)
 
 app = FastAPI(title="Mergington High School API",
               description="API for viewing and signing up for extracurricular activities")
